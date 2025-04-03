@@ -251,8 +251,34 @@ impl Compiler for Compiler86x64 {
         let mut operations: Vec<_> = operations.collect();
         let mut file = stdout();
 
+        writeln!(file, "section .data").context("writing on file")?;
+        writeln!(file, "dump_buf times 32 db 0").context("writing on file")?;
+
         writeln!(file, "section .text").context("writing on file")?;
         writeln!(file, "global _start").context("writing on file")?;
+
+        writeln!(file, "dump:").context("writing on file")?;
+        writeln!(file, "\tmov rax, rdi").context("writing on file")?;
+        writeln!(file, "\tmov rbx, dump_buf").context("writing on file")?;
+        writeln!(file, "\tadd rbx, 31").context("writing on file")?;
+        writeln!(file, "\tmov byte [rbx], 10 ").context("writing on file")?;
+        writeln!(file, "\tmov rcx, 10").context("writing on file")?;
+        writeln!(file, "dump_loop_start:").context("writing on file")?;
+        writeln!(file, "\tsub rbx, 1").context("writing on file")?;
+        writeln!(file, "\txor rdx, rdx  ").context("writing on file")?;
+        writeln!(file, "\tdiv rcx").context("writing on file")?;
+        writeln!(file, "\tadd rdx, 48").context("writing on file")?;
+        writeln!(file, "\tmov byte [rbx], dl ").context("writing on file")?;
+        writeln!(file, "\ttest rax, rax").context("writing on file")?;
+        writeln!(file, "\tjnz dump_loop_start").context("writing on file")?;
+        writeln!(file, "\tmov rax, 1").context("writing on file")?;
+        writeln!(file, "\tmov rdi, 1").context("writing on file")?;
+        writeln!(file, "\tmov rsi, rbx").context("writing on file")?;
+        writeln!(file, "\tsub rbx, dump_buf").context("writing on file")?;
+        writeln!(file, "\tmov rdx, rbx").context("writing on file")?;
+        writeln!(file, "\tsyscall").context("writing on file")?;
+        writeln!(file, "\tret").context("writing on file")?;
+
         writeln!(file, "_start:").context("writing on file")?;
 
         let mut idx = 0;
@@ -276,7 +302,11 @@ impl Compiler for Compiler86x64 {
                     writeln!(file, "\tmovzx rax, al").context("writing on file")?;
                     writeln!(file, "\tpush rax").context("writing on file");
                 }
-                Operation::Dump => todo!(),
+                Operation::Dump => {
+                    writeln!(file, "\tpop rax").context("writing on file")?;
+                    writeln!(file, "\tmov rdi, rax").context("writing on file")?;
+                    writeln!(file, "\tcall dump").context("writing on file")?;
+                }
                 Operation::If(None) => unreachable!(),
                 Operation::If(Some(end_pos)) => {
                     writeln!(file, "\tpop rax").context("writing on file")?;
