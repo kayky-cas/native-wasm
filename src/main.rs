@@ -23,6 +23,8 @@ enum Token {
     While,
     Then,
     Less,
+    Greater,
+    Slash,
 }
 
 struct Lexer<'a> {
@@ -96,6 +98,7 @@ impl<'a> Iterator for Lexer<'a> {
             b'+' => Token::Plus,
             b'=' => Token::Equal,
             b'<' => Token::Less,
+            b'>' => Token::Greater,
             b'/' => {
                 let _ = self.next_byte();
 
@@ -103,7 +106,7 @@ impl<'a> Iterator for Lexer<'a> {
                     self.skip_until_next_line();
                     self.next()?
                 } else {
-                    todo!()
+                    Token::Slash
                 }
             }
             b':' => {
@@ -158,6 +161,8 @@ enum Operation {
     While,
     Then(Option<usize>),
     Less,
+    Greater,
+    Division,
 }
 
 struct Parser<I: Iterator<Item = Token>> {
@@ -181,6 +186,7 @@ where
             Token::Int(integer) => Operation::Push(integer),
             Token::Dot => Operation::Dump,
             Token::Plus => Operation::Plus,
+            Token::Slash => Operation::Division,
             Token::Equal => Operation::Equal,
             Token::If => Operation::If(None),
             Token::End => Operation::End(None),
@@ -188,6 +194,7 @@ where
             Token::While => Operation::While,
             Token::Then => Operation::Then(None),
             Token::Less => Operation::Less,
+            Token::Greater => Operation::Greater,
         };
 
         Some(op)
@@ -272,6 +279,13 @@ impl Compiler for Simulator {
 
                     stack.push(x + y);
                 }
+                Operation::Division => {
+                    let y = stack.pop().unwrap();
+                    let x = stack.pop().unwrap();
+
+                    stack.push(x / y);
+                    stack.push(x % y);
+                }
                 Operation::Equal => {
                     let x = stack.pop().unwrap();
                     let y = stack.pop().unwrap();
@@ -284,6 +298,13 @@ impl Compiler for Simulator {
 
                     stack.push((x < y) as usize);
                 }
+                Operation::Greater => {
+                    let y = stack.pop().unwrap();
+                    let x = stack.pop().unwrap();
+
+                    stack.push((x > y) as usize);
+                }
+                Operation::Then(None) => unreachable!(),
                 Operation::If(None) => unreachable!(),
                 Operation::Then(Some(end_pos)) | Operation::If(Some(end_pos)) => {
                     let x = stack.pop().unwrap();
@@ -300,7 +321,6 @@ impl Compiler for Simulator {
                     stack.push(x);
                 }
                 Operation::While => {}
-                Operation::Then(None) => unreachable!(),
             }
 
             idx += 1;
@@ -362,10 +382,19 @@ impl Compiler for Compiler86x64 {
                     writeln!(file, "\tadd rax, rbx").context("writing on file")?;
                     writeln!(file, "\tpush rax").context("writing on file");
                 }
+                Operation::Division => {
+                    writeln!(file, "\t;; DIVISION ;;").context("writing on file")?;
+                    writeln!(file, "\tpop rcx").context("writing on file")?;
+                    writeln!(file, "\tpop rax").context("writing on file")?;
+                    writeln!(file, "\txor rdx, rdx").context("writing on file");
+                    writeln!(file, "\tdiv rcx").context("writing on file")?;
+                    writeln!(file, "\tpush rax").context("writing on file");
+                    writeln!(file, "\tpush rdx").context("writing on file");
+                }
                 Operation::Equal => {
                     writeln!(file, "\t;; EQUAL ;;").context("writing on file")?;
-                    writeln!(file, "\tpop rax").context("writing on file")?;
                     writeln!(file, "\tpop rbx").context("writing on file")?;
+                    writeln!(file, "\tpop rax").context("writing on file")?;
                     writeln!(file, "\tcmp rax, rbx").context("writing on file")?;
                     writeln!(file, "\tsete al").context("writing on file")?;
                     writeln!(file, "\tmovzx rax, al").context("writing on file")?;
@@ -377,6 +406,15 @@ impl Compiler for Compiler86x64 {
                     writeln!(file, "\tpop rax").context("writing on file")?;
                     writeln!(file, "\tcmp rax, rbx").context("writing on file")?;
                     writeln!(file, "\tsetl al").context("writing on file")?;
+                    writeln!(file, "\tmovzx rax, al").context("writing on file")?;
+                    writeln!(file, "\tpush rax").context("writing on file");
+                }
+                Operation::Greater => {
+                    writeln!(file, "\t;; Greater ;;").context("writing on file")?;
+                    writeln!(file, "\tpop rbx").context("writing on file")?;
+                    writeln!(file, "\tpop rax").context("writing on file")?;
+                    writeln!(file, "\tcmp rax, rbx").context("writing on file")?;
+                    writeln!(file, "\tsetg al").context("writing on file")?;
                     writeln!(file, "\tmovzx rax, al").context("writing on file")?;
                     writeln!(file, "\tpush rax").context("writing on file");
                 }
