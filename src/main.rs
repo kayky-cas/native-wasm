@@ -19,6 +19,10 @@ enum Token {
     Equal,
     If,
     End,
+    QuadDots,
+    While,
+    Then,
+    Less,
 }
 
 struct Lexer<'a> {
@@ -55,6 +59,13 @@ impl<'a> Lexer<'a> {
             Some(byte)
         }
     }
+
+    fn skip_until_next_line(&mut self) {
+        while self.peak_byte().map(|b| b != b'\n').unwrap_or(false) {
+            self.next_byte();
+        }
+        self.next_byte();
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {
@@ -84,6 +95,27 @@ impl<'a> Iterator for Lexer<'a> {
             }
             b'+' => Token::Plus,
             b'=' => Token::Equal,
+            b'<' => Token::Less,
+            b'/' => {
+                let _ = self.next_byte();
+
+                if self.peak_byte()? == b'/' {
+                    self.skip_until_next_line();
+                    self.next()?
+                } else {
+                    todo!()
+                }
+            }
+            b':' => {
+                let _ = self.next_byte();
+
+                if self.peak_byte()? != b':' {
+                    self.next_byte();
+                    return None;
+                }
+
+                Token::QuadDots
+            }
             b'a'..=b'z' | b'A'..=b'Z' => {
                 let start = self.position;
 
@@ -99,6 +131,8 @@ impl<'a> Iterator for Lexer<'a> {
                     .expect("all input should be UTF-8")
                 {
                     "if" => Token::If,
+                    "while" => Token::While,
+                    "then" => Token::Then,
                     "end" => Token::End,
                     ident => unreachable!("invalid identifier {ident}"),
                 }
@@ -119,7 +153,11 @@ enum Operation {
     Plus,
     Equal,
     If(Option<usize>),
-    End,
+    End(Option<usize>),
+    Dup,
+    While,
+    Then(Option<usize>),
+    Less,
 }
 
 struct Parser<I: Iterator<Item = Token>> {
@@ -145,7 +183,11 @@ where
             Token::Plus => Operation::Plus,
             Token::Equal => Operation::Equal,
             Token::If => Operation::If(None),
-            Token::End => Operation::End,
+            Token::End => Operation::End(None),
+            Token::QuadDots => Operation::Dup,
+            Token::While => Operation::While,
+            Token::Then => Operation::Then(None),
+            Token::Less => Operation::Less,
         };
 
         Some(op)
@@ -161,21 +203,31 @@ impl BlockParser {
         let mut operations: Vec<_> = tokens.collect();
 
         let mut block_stack = Vec::new();
+        let mut while_stack = Vec::new();
 
         for (idx, operation) in operations.iter_mut().enumerate() {
             match operation {
-                Operation::If(None) => {
+                Operation::While => {
+                    while_stack.push(idx);
+                }
+                Operation::If(None) | Operation::Then(None) => {
                     block_stack.push(operation);
                 }
-                Operation::End => match block_stack.pop() {
+                Operation::End(back @ None) => match block_stack.pop() {
                     Some(Operation::If(end_pos @ None)) => {
                         *end_pos = Some(idx);
                     }
+                    Some(Operation::Then(end_pos @ None)) => {
+                        *end_pos = Some(idx);
+                        *back = while_stack.pop();
+                    }
+
                     Some(_) => {
                         unreachable!("Invalid block");
                     }
                     None => panic!("ERROR: Unmatched `end`"),
                 },
+                Operation::End(Some(_)) => unreachable!(),
                 _ => {}
             }
         }
@@ -226,15 +278,29 @@ impl Compiler for Simulator {
 
                     stack.push((x == y) as usize);
                 }
+                Operation::Less => {
+                    let y = stack.pop().unwrap();
+                    let x = stack.pop().unwrap();
+
+                    stack.push((x < y) as usize);
+                }
                 Operation::If(None) => unreachable!(),
-                Operation::If(Some(end_pos)) => {
+                Operation::Then(Some(end_pos)) | Operation::If(Some(end_pos)) => {
                     let x = stack.pop().unwrap();
 
                     if x == 0 {
                         idx = end_pos;
                     }
                 }
-                Operation::End => {}
+                Operation::End(None) => {}
+                Operation::End(Some(while_idx)) => idx = while_idx,
+                Operation::Dup => {
+                    let x = stack.pop().unwrap();
+                    stack.push(x);
+                    stack.push(x);
+                }
+                Operation::While => {}
+                Operation::Then(None) => unreachable!(),
             }
 
             idx += 1;
@@ -263,14 +329,14 @@ impl Compiler for Compiler86x64 {
         writeln!(file, "\tadd rbx, 31").context("writing on file")?;
         writeln!(file, "\tmov byte [rbx], 10 ").context("writing on file")?;
         writeln!(file, "\tmov rcx, 10").context("writing on file")?;
-        writeln!(file, "dump_loop_start:").context("writing on file")?;
+        writeln!(file, "LP_DUMP:").context("writing on file")?;
         writeln!(file, "\tsub rbx, 1").context("writing on file")?;
         writeln!(file, "\txor rdx, rdx  ").context("writing on file")?;
         writeln!(file, "\tdiv rcx").context("writing on file")?;
         writeln!(file, "\tadd rdx, 48").context("writing on file")?;
         writeln!(file, "\tmov byte [rbx], dl ").context("writing on file")?;
         writeln!(file, "\ttest rax, rax").context("writing on file")?;
-        writeln!(file, "\tjnz dump_loop_start").context("writing on file")?;
+        writeln!(file, "\tjnz LP_DUMP").context("writing on file")?;
         writeln!(file, "\tmov rax, 1").context("writing on file")?;
         writeln!(file, "\tmov rdi, 1").context("writing on file")?;
         writeln!(file, "\tmov rsi, rbx").context("writing on file")?;
@@ -285,16 +351,19 @@ impl Compiler for Compiler86x64 {
 
         while idx < operations.len() {
             match operations[idx] {
-                Operation::Push(integer) => file
-                    .write_fmt(format_args!("\tpush {integer}\n"))
-                    .context("writing on file")?,
+                Operation::Push(integer) => {
+                    writeln!(file, "\t;; PUSH ;;").context("writing on file")?;
+                    writeln!(file, "\tpush {integer}").context("writing on file")?;
+                }
                 Operation::Plus => {
+                    writeln!(file, "\t;; PLUS ;;").context("writing on file")?;
                     writeln!(file, "\tpop rax").context("writing on file")?;
                     writeln!(file, "\tpop rbx").context("writing on file")?;
                     writeln!(file, "\tadd rax, rbx").context("writing on file")?;
                     writeln!(file, "\tpush rax").context("writing on file");
                 }
                 Operation::Equal => {
+                    writeln!(file, "\t;; EQUAL ;;").context("writing on file")?;
                     writeln!(file, "\tpop rax").context("writing on file")?;
                     writeln!(file, "\tpop rbx").context("writing on file")?;
                     writeln!(file, "\tcmp rax, rbx").context("writing on file")?;
@@ -302,19 +371,48 @@ impl Compiler for Compiler86x64 {
                     writeln!(file, "\tmovzx rax, al").context("writing on file")?;
                     writeln!(file, "\tpush rax").context("writing on file");
                 }
-                Operation::Dump => {
+                Operation::Less => {
+                    writeln!(file, "\t;; Less ;;").context("writing on file")?;
+                    writeln!(file, "\tpop rbx").context("writing on file")?;
                     writeln!(file, "\tpop rax").context("writing on file")?;
-                    writeln!(file, "\tmov rdi, rax").context("writing on file")?;
+                    writeln!(file, "\tcmp rax, rbx").context("writing on file")?;
+                    writeln!(file, "\tsetl al").context("writing on file")?;
+                    writeln!(file, "\tmovzx rax, al").context("writing on file")?;
+                    writeln!(file, "\tpush rax").context("writing on file");
+                }
+                Operation::Dump => {
+                    writeln!(file, "\t;; DUMP ;;").context("writing on file")?;
+                    writeln!(file, "\tpop rdi").context("writing on file")?;
                     writeln!(file, "\tcall dump").context("writing on file")?;
                 }
                 Operation::If(None) => unreachable!(),
                 Operation::If(Some(end_pos)) => {
+                    writeln!(file, "\t;; IF ;;").context("writing on file")?;
                     writeln!(file, "\tpop rax").context("writing on file")?;
                     writeln!(file, "\ttest rax, rax").context("writing on file")?;
-                    writeln!(file, "\tjz end_{end_pos}").context("writing on file")?;
+                    writeln!(file, "\tjz END_{end_pos}").context("writing on file")?;
                 }
-                Operation::End => {
-                    writeln!(file, "end_{idx}:").context("writing on file")?;
+                Operation::Then(None) => unreachable!(),
+                Operation::Then(Some(end_pos)) => {
+                    writeln!(file, "\t;; WHILE THEN ;;").context("writing on file")?;
+                    writeln!(file, "\tpop rax").context("writing on file")?;
+                    writeln!(file, "\ttest rax, rax").context("writing on file")?;
+                    writeln!(file, "\tjz END_{end_pos}").context("writing on file")?;
+                }
+                Operation::End(None) => {
+                    writeln!(file, "END_{idx}:").context("writing on file")?;
+                }
+                Operation::End(Some(while_idx)) => {
+                    writeln!(file, "\tjmp L{while_idx}").context("writing on file")?;
+                    writeln!(file, "END_{idx}:").context("writing on file")?;
+                }
+                Operation::Dup => {
+                    writeln!(file, "\tpop rax").context("writing on file")?;
+                    writeln!(file, "\tpush rax").context("writing on file")?;
+                    writeln!(file, "\tpush rax").context("writing on file")?;
+                }
+                Operation::While => {
+                    writeln!(file, "L{idx}:").context("writing on file")?;
                 }
             }
             idx += 1;
